@@ -1,0 +1,36 @@
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+*.secret
+*.credentials
+secrets/
+*.pem
+*.key
+
+# Python environments, bytecode, and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+
+# Generated test, coverage, and log files
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.log
+logs/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Operating-system files
+.DS_Store
+Thumbs.db

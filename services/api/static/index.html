@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f9fc" />
+    <meta name="description" content="CloudSentinel endpoint check dashboard" />
+    <meta name="cloudsentinel-api-base-url" content="__CLOUDSENTINEL_API_BASE_URL__" />
+    <title>Overview · CloudSentinel</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <a class="brand" href="#overview" aria-label="CloudSentinel overview">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none"><path d="M9.3 23.7a8 8 0 1 1 8.4-13.5 8 8 0 0 1 5 13.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M16 9.2v13.6M9.2 16h13.6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="16" cy="16" r="13.2" stroke="currentColor" stroke-width="1.6" opacity=".35"/></svg>
+          </span>
+          <span>Cloud<span class="brand-light">Sentinel</span></span>
+        </a>
+        <div class="side-label">WORKSPACE</div>
+        <nav class="nav-list">
+          <a class="nav-link active" href="#overview" aria-current="page"><span class="nav-icon">⌂</span>Overview</a>
+          <a class="nav-link" href="#endpoints"><span class="nav-icon">◎</span>Endpoints</a>
+          <a class="nav-link" href="#history"><span class="nav-icon">◷</span>Check history</a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="workspace-card"><span class="workspace-avatar">C</span><span><strong>CloudSentinel</strong><small>Local workspace</small></span><span class="workspace-dots" aria-hidden="true">···</span></div>
+          <p class="sidebar-note">Checks run when you request them. No scheduled monitoring is configured.</p>
+        </div>
+      </aside>
+
+      <main class="main-content" id="overview">
+        <header class="topbar">
+          <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">◉</span>CloudSentinel</div>
+          <div class="page-heading"><div class="eyebrow">WORKSPACE / OVERVIEW</div><h1>Endpoint overview</h1><p>A clear view of your recent endpoint checks.</p></div>
+          <div class="top-actions">
+            <div class="connection-status" aria-live="polite"><span class="status-dot checking" id="api-dot"></span><span id="api-status">Connecting to API</span><span class="connection-divider"></span><span class="status-dot checking" id="db-dot"></span><span id="db-status">Database</span></div>
+            <button class="button button-primary" id="open-check" type="button"><span aria-hidden="true">＋</span> Check endpoint</button>
+          </div>
+        </header>
+
+        <section class="metrics-grid" aria-label="Check summary">
+          <article class="metric-card"><div class="metric-top"><span>Total checks</span><span class="metric-icon blue">↗</span></div><strong class="metric-value" id="metric-total">—</strong><span class="metric-caption">All recorded checks</span></article>
+          <article class="metric-card"><div class="metric-top"><span>Successful</span><span class="metric-icon green">✓</span></div><strong class="metric-value" id="metric-success">—</strong><span class="metric-caption">Responses below 400</span></article>
+          <article class="metric-card"><div class="metric-top"><span>Failed</span><span class="metric-icon red">!</span></div><strong class="metric-value" id="metric-failed">—</strong><span class="metric-caption">Errors and HTTP failures</span></article>
+          <article class="metric-card"><div class="metric-top"><span>Average response time</span><span class="metric-icon violet">◷</span></div><strong class="metric-value" id="metric-latency">—</strong><span class="metric-caption">Across checks with a response</span></article>
+        </section>
+
+        <section class="panel endpoint-panel" id="endpoints" aria-labelledby="endpoint-title">
+          <div class="panel-header"><div><div class="section-kicker">QUICK ACTION</div><h2 id="endpoint-title">Check an endpoint</h2><p>Run a one-time availability check for a public HTTP or HTTPS URL.</p></div><span class="panel-symbol" aria-hidden="true">↗</span></div>
+          <form class="check-form" id="check-form" novalidate>
+            <div class="field url-field"><label for="endpoint-url">Endpoint URL</label><input id="endpoint-url" name="url" type="url" placeholder="https://example.com/health" autocomplete="url" required aria-describedby="url-hint url-error" /><span class="field-hint" id="url-hint">Only public HTTP and HTTPS endpoints can be checked.</span><span class="field-error" id="url-error"></span></div>
+            <div class="field timeout-field"><label for="timeout">Timeout</label><div class="input-suffix"><input id="timeout" name="timeout_seconds" type="number" min="0.001" max="30" step="any" value="5" required aria-describedby="timeout-error" /><span>sec</span></div><span class="field-hint">Greater than 0 and up to 30 seconds</span><span class="field-error" id="timeout-error"></span></div>
+            <button class="button button-primary submit-button" id="submit-check" type="submit"><span class="button-label">Run check</span><span class="spinner" aria-hidden="true"></span></button>
+          </form>
+          <div class="result-banner" id="result-banner" role="status" aria-live="polite" hidden></div>
+        </section>
+
+        <section class="panel history-panel" id="history" aria-labelledby="history-title">
+          <div class="panel-header history-header"><div><div class="section-kicker">ACTIVITY</div><h2 id="history-title">Check history</h2><p id="history-subtitle">Your latest endpoint check results.</p></div><button class="button button-secondary refresh-button" id="refresh-history" type="button"><span aria-hidden="true">↻</span><span>Refresh</span></button></div>
+          <div class="table-wrap" id="table-wrap">
+            <table><thead><tr><th scope="col">Endpoint URL</th><th scope="col">Status</th><th scope="col">HTTP code</th><th scope="col">Response time</th><th scope="col">Last checked</th></tr></thead><tbody id="history-rows"></tbody></table>
+          </div>
+          <div class="empty-state" id="empty-state" hidden><div class="empty-icon" aria-hidden="true">⌁</div><h3>No checks yet</h3><p>Run your first endpoint check to see its availability, response time, and check history here.</p><button class="button button-secondary" id="empty-check" type="button">Check your first endpoint</button></div>
+          <div class="load-error" id="history-error" hidden><strong>History could not be loaded.</strong><span id="history-error-text">Check your API connection and try again.</span><button class="text-button" id="retry-history" type="button">Try again</button></div>
+          <div class="table-footer" id="table-footer"><span id="row-count">Showing recent checks</span><span>Latest 100 records</span></div>
+        </section>
+        <footer class="page-footer"><span>CloudSentinel</span><span>On-demand endpoint checks</span></footer>
+      </main>
+    </div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
