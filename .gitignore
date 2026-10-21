@@ -37,3 +37,4 @@ Thumbs.db
 
 # Vercel project linkage and local build output
 .vercel/
+.vercel

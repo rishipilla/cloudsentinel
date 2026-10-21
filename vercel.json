@@ -1,0 +1,19 @@
+{
+  "services": {
+    "cloudsentinel-web": {
+      "root": ".",
+      "framework": "python",
+      "entrypoint": "services.api.main:app",
+      "buildCommand": "pip install -r requirements.txt"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "type": "service",
+        "service": "cloudsentinel-web"
+      }
+    }
+  ]
+}

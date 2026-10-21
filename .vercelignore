@@ -12,3 +12,11 @@ tests/
 *.secret
 *.credentials
 secrets/
+
+.pytest_tmp/
+
+.pytest_tmp/
+
+.venv/
+
+.env
