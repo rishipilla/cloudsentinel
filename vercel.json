@@ -1,10 +1,11 @@
 
+
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "cloudsentinel-web": {
       "root": ".",
-      "entrypoint": "services/api/main.py",
+      "entrypoint": "services.api.main:app",
       "framework": "fastapi"
     }
   },
