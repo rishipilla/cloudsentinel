@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f7f9fc" />
+    <meta name="theme-color" content="#050807" />
     <meta name="description" content="CloudSentinel endpoint check dashboard" />
     <meta name="cloudsentinel-api-base-url" content="__CLOUDSENTINEL_API_BASE_URL__" />
-    <title>Overview · CloudSentinel</title>
+    <title>Security Operations · Cyber Sentinel</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -16,26 +16,32 @@
           <span class="brand-mark" aria-hidden="true">
             <svg viewBox="0 0 32 32" fill="none"><path d="M9.3 23.7a8 8 0 1 1 8.4-13.5 8 8 0 0 1 5 13.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M16 9.2v13.6M9.2 16h13.6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="16" cy="16" r="13.2" stroke="currentColor" stroke-width="1.6" opacity=".35"/></svg>
           </span>
-          <span>Cloud<span class="brand-light">Sentinel</span></span>
+          <span>CYBER <span class="brand-light">SENTINEL</span></span>
         </a>
-        <div class="side-label">WORKSPACE</div>
+        <div class="side-label">OPERATIONS</div>
         <nav class="nav-list">
           <a class="nav-link active" href="#overview" aria-current="page"><span class="nav-icon">⌂</span>Overview</a>
+          <a class="nav-link" href="#topology"><span class="nav-icon">◎</span>Network</a>
           <a class="nav-link" href="#endpoints"><span class="nav-icon">◎</span>Endpoints</a>
+          <a class="nav-link" href="#scheduled"><span class="nav-icon">◷</span>Scheduled</a>
+          <a class="nav-link" href="#incidents"><span class="nav-icon">!</span>Incidents</a>
+          <a class="nav-link" href="#notification-delivery"><span class="nav-icon">@</span>Email delivery</a>
+          <a class="nav-link" href="#reputation"><span class="nav-icon">◉</span>Reputation</a>
           <a class="nav-link" href="#history"><span class="nav-icon">◷</span>Check history</a>
         </nav>
         <div class="sidebar-bottom">
           <div class="workspace-card"><span class="workspace-avatar">C</span><span><strong>CloudSentinel</strong><small>Local workspace</small></span><span class="workspace-dots" aria-hidden="true">···</span></div>
-          <p class="sidebar-note">Checks run when you request them. No scheduled monitoring is configured.</p>
+          <p class="sidebar-note">On-demand checks run from the dashboard. Scheduled checks need the separate worker process.</p>
         </div>
       </aside>
 
       <main class="main-content" id="overview">
         <header class="topbar">
-          <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">◉</span>CloudSentinel</div>
-          <div class="page-heading"><div class="eyebrow">WORKSPACE / OVERVIEW</div><h1>Endpoint overview</h1><p>A clear view of your recent endpoint checks.</p></div>
+          <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">◉</span>CYBER SENTINEL</div>
+          <div class="page-heading"><div class="eyebrow">SECURITY OPERATIONS / OVERVIEW</div><h1>Endpoint operations</h1><p>Availability signals from your monitored public endpoints.</p></div>
           <div class="top-actions">
             <div class="connection-status" aria-live="polite"><span class="status-dot checking" id="api-dot"></span><span id="api-status">Connecting to API</span><span class="connection-divider"></span><span class="status-dot checking" id="db-dot"></span><span id="db-status">Database</span></div>
+            <span class="sync-time" id="last-updated">Waiting for first sync</span>
             <button class="button button-primary" id="open-check" type="button"><span aria-hidden="true">＋</span> Check endpoint</button>
           </div>
         </header>
@@ -45,6 +51,12 @@
           <article class="metric-card"><div class="metric-top"><span>Successful</span><span class="metric-icon green">✓</span></div><strong class="metric-value" id="metric-success">—</strong><span class="metric-caption">Responses below 400</span></article>
           <article class="metric-card"><div class="metric-top"><span>Failed</span><span class="metric-icon red">!</span></div><strong class="metric-value" id="metric-failed">—</strong><span class="metric-caption">Errors and HTTP failures</span></article>
           <article class="metric-card"><div class="metric-top"><span>Average response time</span><span class="metric-icon violet">◷</span></div><strong class="metric-value" id="metric-latency">—</strong><span class="metric-caption">Across checks with a response</span></article>
+        </section>
+
+        <section class="panel topology-panel" id="topology" aria-labelledby="topology-title">
+          <div class="panel-header"><div><div class="section-kicker">MONITORED SURFACE</div><h2 id="topology-title">Endpoint network</h2><p>Scheduled targets and their latest reported availability. The API does not provide network paths or traffic flows.</p></div><span class="data-stamp" id="topology-count">Loading inventory</span></div>
+          <div class="topology-state" id="topology-state" role="status">Loading scheduled endpoint inventory…</div>
+          <ul class="endpoint-nodes" id="endpoint-nodes" aria-label="Scheduled endpoint status"></ul>
         </section>
 
         <section class="panel endpoint-panel" id="endpoints" aria-labelledby="endpoint-title">
@@ -57,16 +69,63 @@
           <div class="result-banner" id="result-banner" role="status" aria-live="polite" hidden></div>
         </section>
 
+        <section class="panel schedule-panel" id="scheduled" aria-labelledby="schedule-title">
+          <div class="panel-header history-header"><div><div class="section-kicker">AUTOMATED AVAILABILITY</div><h2 id="schedule-title">Scheduled endpoints</h2><p>Checks run at the configured interval while the separate scheduler worker is running.</p></div><button class="button button-secondary refresh-button" id="refresh-schedules" type="button"><span aria-hidden="true">↻</span><span>Refresh</span></button></div>
+          <form class="schedule-form" id="schedule-form" novalidate>
+            <input id="schedule-id" type="hidden" />
+            <div class="field schedule-url-field"><label for="schedule-url">Public endpoint URL</label><input id="schedule-url" type="url" placeholder="https://example.com/health" required autocomplete="url" /></div>
+            <div class="field"><label for="schedule-interval">Interval</label><div class="input-suffix"><input id="schedule-interval" type="number" min="1" max="1440" step="1" value="5" required /><span>min</span></div></div>
+            <div class="field"><label for="schedule-timeout">Request timeout</label><div class="input-suffix"><input id="schedule-timeout" type="number" min="0.1" max="30" step="0.1" value="5" required /><span>sec</span></div></div>
+            <div class="field"><label for="schedule-failures">Failure threshold</label><div class="input-suffix"><input id="schedule-failures" type="number" min="1" max="10" step="1" value="3" required /><span>checks</span></div></div>
+            <div class="schedule-form-actions"><button class="button button-primary" id="save-schedule" type="submit">Create schedule</button><button class="button button-secondary" id="cancel-schedule-edit" type="button" hidden>Cancel edit</button></div>
+          </form>
+          <div class="loading-state" id="schedule-loading">Loading schedules…</div>
+          <div class="inline-error" id="schedule-error" role="alert" hidden></div>
+          <div class="empty-state compact-empty" id="schedule-empty" hidden><h3>No scheduled endpoints</h3><p>Create a schedule above. The worker must also be running for checks to execute.</p></div>
+          <div class="table-wrap schedule-table-wrap" id="schedule-table-wrap" hidden>
+            <table><thead><tr><th scope="col">Endpoint</th><th scope="col">Interval</th><th scope="col">State</th><th scope="col">Last check</th><th scope="col">Next check</th><th scope="col">Actions</th></tr></thead><tbody id="schedule-rows"></tbody></table>
+          </div>
+          <div class="schedule-history" id="schedule-history" hidden><div class="schedule-history-heading"><strong id="schedule-history-title">Recent scheduled checks</strong><button class="text-button" id="close-schedule-history" type="button">Close</button></div><div id="schedule-history-rows"></div></div>
+        </section>
+
+        <section class="panel incidents-panel" id="incidents" aria-labelledby="incidents-title">
+          <div class="panel-header history-header"><div><div class="section-kicker">AVAILABILITY</div><h2 id="incidents-title">Endpoint incidents</h2><p>An incident opens after the configured consecutive failure threshold and resolves after a successful check.</p></div></div>
+          <div class="loading-state" id="incident-loading">Loading incidents…</div>
+          <div class="inline-error" id="incident-error" role="alert" hidden></div>
+          <div class="empty-state compact-empty" id="incident-empty" hidden><h3>No incidents recorded</h3><p>Scheduled availability incidents will appear here.</p></div>
+          <div class="table-wrap incident-table-wrap" id="incident-table-wrap" hidden><table><thead><tr><th scope="col">Endpoint</th><th scope="col">State</th><th scope="col">Failures</th><th scope="col">Started</th><th scope="col">Resolved</th><th scope="col">Latest detail</th></tr></thead><tbody id="incident-rows"></tbody></table></div>
+        </section>
+
+        <section class="panel" id="notification-delivery" aria-labelledby="notification-title">
+          <div class="panel-header history-header"><div><div class="section-kicker">ALERTING</div><h2 id="notification-title">Notification delivery</h2><p>Delivery attempts for incident-opened and incident-resolved emails.</p></div><button class="button button-secondary" id="refresh-notifications" type="button">Refresh</button></div>
+          <div class="loading-state" id="notification-loading" hidden>Loading delivery history…</div>
+          <div class="inline-error" id="notification-error" role="alert" hidden></div>
+          <div class="empty-state compact-empty" id="notification-empty" hidden><h3>No email events yet</h3><p>Incident notifications will be listed here when queued by the scheduler.</p></div>
+          <div class="table-wrap" id="notification-table-wrap" hidden><table><thead><tr><th scope="col">Event</th><th scope="col">Incident</th><th scope="col">Delivery</th><th scope="col">Attempts</th><th scope="col">Created</th><th scope="col">Delivered</th><th scope="col">Last detail</th></tr></thead><tbody id="notification-rows"></tbody></table></div>
+        </section>
+
+        <section class="panel" id="reputation" aria-labelledby="reputation-title">
+          <div class="panel-header history-header"><div><div class="section-kicker">OPTIONAL ENRICHMENT</div><h2 id="reputation-title">Public reputation lookup</h2><p>VirusTotal reputation is a third-party signal, separate from endpoint availability.</p></div></div>
+          <form id="reputation-form" class="check-form reputation-form">
+            <label for="reputation-type">Indicator type</label><select id="reputation-type"><option value="domain">Public domain</option><option value="ip">Public IP address</option></select>
+            <label for="reputation-indicator">Domain or IP</label><input id="reputation-indicator" type="text" maxlength="253" autocomplete="off" placeholder="example.com" required />
+            <button class="button button-primary" id="reputation-submit" type="submit">Look up reputation</button>
+          </form>
+          <p class="muted-cell">Only the entered public domain or IP is sent to VirusTotal. Do not enter a URL, internal hostname, secret, or sensitive indicator. Results are unverified third-party signals, not proof of a threat. Lookup is disabled unless VIRUSTOTAL_API_KEY is configured.</p>
+          <div class="inline-error" id="reputation-error" role="alert" hidden></div>
+          <div class="schedule-history" id="reputation-result" aria-live="polite" hidden></div>
+        </section>
+
         <section class="panel history-panel" id="history" aria-labelledby="history-title">
           <div class="panel-header history-header"><div><div class="section-kicker">ACTIVITY</div><h2 id="history-title">Check history</h2><p id="history-subtitle">Your latest endpoint check results.</p></div><button class="button button-secondary refresh-button" id="refresh-history" type="button"><span aria-hidden="true">↻</span><span>Refresh</span></button></div>
           <div class="table-wrap" id="table-wrap">
-            <table><thead><tr><th scope="col">Endpoint URL</th><th scope="col">Status</th><th scope="col">HTTP code</th><th scope="col">Response time</th><th scope="col">Last checked</th></tr></thead><tbody id="history-rows"></tbody></table>
+            <table><thead><tr><th scope="col">Endpoint URL</th><th scope="col">Status</th><th scope="col">HTTP code</th><th scope="col">Response time</th><th scope="col">Last checked</th><th scope="col">Details</th></tr></thead><tbody id="history-rows"></tbody></table>
           </div>
           <div class="empty-state" id="empty-state" hidden><div class="empty-icon" aria-hidden="true">⌁</div><h3>No checks yet</h3><p>Run your first endpoint check to see its availability, response time, and check history here.</p><button class="button button-secondary" id="empty-check" type="button">Check your first endpoint</button></div>
           <div class="load-error" id="history-error" hidden><strong>History could not be loaded.</strong><span id="history-error-text">Check your API connection and try again.</span><button class="text-button" id="retry-history" type="button">Try again</button></div>
           <div class="table-footer" id="table-footer"><span id="row-count">Showing recent checks</span><span>Latest 100 records</span></div>
         </section>
-        <footer class="page-footer"><span>CloudSentinel</span><span>On-demand endpoint checks</span></footer>
+        <footer class="page-footer"><span>CloudSentinel</span><span>On-demand and scheduled endpoint monitoring</span></footer>
       </main>
     </div>
     <script src="/static/app.js" defer></script>

@@ -34,3 +34,6 @@ logs/
 # Operating-system files
 .DS_Store
 Thumbs.db
+
+# Vercel project linkage and local build output
+.vercel/

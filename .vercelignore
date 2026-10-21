@@ -1,0 +1,14 @@
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.pytest_tmp/
+tests/
+*.db
+*.sqlite
+*.sqlite3
+*.secret
+*.credentials
+secrets/

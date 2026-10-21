@@ -1,0 +1,9 @@
+name = "cloudsentinel-access-gateway"
+main = "worker.js"
+compatibility_date = "2026-10-21"
+workers_dev = false
+preview_urls = false
+
+# Attach a chosen custom domain only after an Access application and allow policy
+# are in place. ORIGIN_URL and CLOUDSENTINEL_GATEWAY_SECRET are configured as
+# dashboard bindings; the latter must be a Secret, never a plain variable.

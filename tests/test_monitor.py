@@ -1,6 +1,12 @@
 import asyncio
+import os
+import secrets
+import threading
 from datetime import datetime, timezone
+from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -8,7 +14,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from database.models import MonitoringCheck
+from database.models import IncidentNotification, MonitoringCheck, MonitoringIncident, MonitoringSchedule
+from database.session import database_url_from_environment
 from services.api import main
 
 
@@ -75,7 +82,11 @@ def test_failed_probe_is_persisted_without_sensitive_url_values(monkeypatch):
     with TestClient(app) as client:
         response = client.post("/api/v1/check", json={"url": result["url"]})
         assert response.status_code == 200
-        assert response.json() == result
+        assert response.json() == {
+            **result,
+            "url": "https://service.example/check?access_token=%5BREDACTED%5D&region=west",
+        }
+        assert "secret" not in response.text
 
         with app.state.session_factory() as session:
             saved = session.scalar(select(MonitoringCheck))
@@ -174,7 +185,12 @@ def test_history_returns_real_summary_and_latest_checks(monkeypatch):
     app = main.create_app("sqlite+pysqlite:///:memory:")
     results = [
         make_result(status_code=200, latency_ms=20.0),
-        make_result(url="https://other.example/", status="down", status_code=503, latency_ms=80.0),
+        make_result(
+            url="https://other.example/",
+            status="down",
+            status_code=503,
+            latency_ms=80.0,
+        ),
     ]
     monkeypatch.setattr(main, "check_endpoint", AsyncMock(side_effect=results))
 
@@ -195,6 +211,7 @@ def test_history_returns_real_summary_and_latest_checks(monkeypatch):
     assert payload["checks"][0]["url"] == "https://other.example/"
     assert payload["checks"][0]["status"] == "down"
     assert payload["checks"][0]["status_code"] == 503
+    assert payload["checks"][0]["error"] == "HTTP response status 503"
 
 
 def test_empty_history_and_dashboard_assets_are_available():
@@ -211,6 +228,16 @@ def test_empty_history_and_dashboard_assets_are_available():
     assert frontend_script.status_code == 200
     assert 'getJson("/api/v1/checks?limit=100")' in frontend_script.text
     assert 'getJson("/api/v1/check"' in frontend_script.text
+    assert 'check.error || "—"' in frontend_script.text
+    assert "Details</th>" in dashboard.text
+    assert 'id="schedule-form"' in dashboard.text
+    assert 'id="incidents"' in dashboard.text
+    assert 'id="notification-delivery"' in dashboard.text
+    assert 'id="reputation-form"' in dashboard.text
+    assert 'getJson("/api/v1/schedules?limit=100")' in frontend_script.text
+    assert 'getJson("/api/v1/incidents?limit=100")' in frontend_script.text
+    assert 'getJson("/api/v1/notifications?limit=100")' in frontend_script.text
+    assert 'getJson("/api/v1/reputation"' in frontend_script.text
     assert "timeout_seconds: Number(elements.timeout.value)" in frontend_script.text
     assert history.json() == {
         "summary": {
@@ -221,6 +248,213 @@ def test_empty_history_and_dashboard_assets_are_available():
         },
         "checks": [],
     }
+
+
+def test_production_target_allowlist_matches_domains_and_rejects_lookalikes(monkeypatch):
+    from services.api.monitor import TargetRejectedError, validate_target_url
+
+    monkeypatch.setenv("CLOUDSENTINEL_ENV", "production")
+    monkeypatch.setenv("CLOUDSENTINEL_TARGET_ALLOWLIST", "example.com,health.example.net")
+    validate_target_url("https://api.example.com/health")
+    validate_target_url("https://example.com/health")
+    with pytest.raises(TargetRejectedError):
+        validate_target_url("https://notexample.com/health")
+
+
+def test_production_target_allowlist_is_closed_when_empty(monkeypatch):
+    from services.api.monitor import TargetRejectedError, validate_target_url
+
+    monkeypatch.setenv("CLOUDSENTINEL_ENV", "production")
+    monkeypatch.delenv("CLOUDSENTINEL_TARGET_ALLOWLIST", raising=False)
+    with pytest.raises(TargetRejectedError):
+        validate_target_url("https://example.com/health")
+
+
+def test_probe_stream_stops_reading_after_response_size_limit(monkeypatch):
+    from services.api import monitor
+
+    monkeypatch.setenv("CLOUDSENTINEL_ENV", "development")
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self):
+            self.chunks_read = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            self.chunks_read += 1
+            yield b"x" * (monitor.MAX_RESPONSE_BYTES + 1)
+            self.chunks_read += 1
+            yield b"this chunk must not be consumed"
+
+    response = FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, url):
+            assert method == "GET"
+            assert url == "https://response.example/health"
+            return response
+
+    monkeypatch.setattr(monitor.httpx, "AsyncClient", FakeClient)
+    result = asyncio.run(monitor.check_endpoint("https://response.example/health"))
+
+    assert result["status_code"] == 200
+    assert response.chunks_read == 1
+
+
+def test_production_target_allowlist_is_enforced_at_schedule_api(monkeypatch):
+    test_token = "K9vR2xM5cT8nP1qD4wB7fH3jL6sA0zE9pY"
+    monkeypatch.setenv("CLOUDSENTINEL_ENV", "production")
+    monkeypatch.setenv("CLOUDSENTINEL_API_TOKEN", test_token)
+    monkeypatch.setenv("CLOUDSENTINEL_GATEWAY_SECRET", "v8Nq5rT2xW7cM1pL4zA9hF6dK3sB0yE2")
+    monkeypatch.setenv("CLOUDSENTINEL_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("CLOUDSENTINEL_TARGET_ALLOWLIST", "approved.example")
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        headers = {
+            "Authorization": f"Bearer {test_token}",
+            "X-CloudSentinel-Gateway-Secret": "v8Nq5rT2xW7cM1pL4zA9hF6dK3sB0yE2",
+        }
+        approved = client.post("/api/v1/schedules", headers=headers, json={
+            "url": "https://health.approved.example/health", "interval_seconds": 60,
+        })
+        rejected = client.post("/api/v1/schedules", headers=headers, json={
+            "url": "https://other.example/health", "interval_seconds": 60,
+        })
+
+    assert approved.status_code == 201
+    assert rejected.status_code == 422
+
+
+def test_production_gateway_secret_is_required_and_checked(monkeypatch):
+    token = "K9vR2xM5cT8nP1qD4wB7fH3jL6sA0zE9pY"
+    gateway_secret = secrets.token_urlsafe(32)
+    monkeypatch.setenv("CLOUDSENTINEL_ENV", "production")
+    monkeypatch.setenv("CLOUDSENTINEL_API_TOKEN", token)
+    monkeypatch.setenv("CLOUDSENTINEL_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("CLOUDSENTINEL_TARGET_ALLOWLIST", "approved.example")
+    monkeypatch.delenv("CLOUDSENTINEL_GATEWAY_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="CLOUDSENTINEL_GATEWAY_SECRET"):
+        main.create_app("sqlite+pysqlite:///:memory:")
+
+    monkeypatch.setenv("CLOUDSENTINEL_GATEWAY_SECRET", gateway_secret)
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+    with TestClient(app) as client:
+        assert client.get("/api/v1/checks").status_code == 404
+        missing_secret = client.get(
+            "/api/v1/checks",
+        )
+        assert missing_secret.headers["cache-control"] == "no-store, private"
+        invalid_secret = client.get(
+            "/api/v1/checks",
+            headers={"X-CloudSentinel-Gateway-Secret": "invalid-gateway-secret"},
+        )
+        assert invalid_secret.status_code == 404
+        assert invalid_secret.headers["cache-control"] == "no-store, private"
+        assert client.get("/").status_code == 404
+        assert client.get("/health/ready").status_code == 404
+        liveness = client.get("/health")
+        assert liveness.json() == {"status": "healthy"}
+        assert liveness.headers["cache-control"] == "no-store, private"
+
+        gateway_headers = {"X-CloudSentinel-Gateway-Secret": gateway_secret}
+        assert client.get("/api/v1/checks", headers=gateway_headers).status_code == 401
+        authenticated_headers = {
+            **gateway_headers,
+            "Authorization": f"Bearer {token}",
+        }
+        history = client.get("/api/v1/checks", headers=authenticated_headers)
+        assert history.status_code == 200
+        assert history.headers["cache-control"] == "no-store, private"
+
+
+def test_authentication_failures_are_rate_limited(monkeypatch):
+    monkeypatch.setenv("CLOUDSENTINEL_API_TOKEN", "test-token")
+    monkeypatch.setenv("CLOUDSENTINEL_AUTH_RATE_LIMIT", "1")
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        first = client.get("/api/v1/checks")
+        second = client.get("/api/v1/checks")
+
+    assert first.status_code == 401
+    assert second.status_code == 429
+    assert second.headers["retry-after"] == "60"
+
+
+def test_on_demand_checks_are_rate_limited(monkeypatch):
+    monkeypatch.delenv("CLOUDSENTINEL_API_TOKEN", raising=False)
+    monkeypatch.setenv("CLOUDSENTINEL_CHECK_RATE_LIMIT", "1")
+    result = make_result()
+    monkeypatch.setattr(main, "check_endpoint", AsyncMock(return_value=result))
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/check", json={"url": result["url"]})
+        second = client.post("/api/v1/check", json={"url": result["url"]})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_schedule_creation_is_rate_limited(monkeypatch):
+    monkeypatch.delenv("CLOUDSENTINEL_API_TOKEN", raising=False)
+    monkeypatch.setenv("CLOUDSENTINEL_SCHEDULE_RATE_LIMIT", "1")
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+    body = {"url": "https://example.com/health", "interval_seconds": 60}
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/schedules", json=body)
+        second = client.post("/api/v1/schedules", json=body)
+
+    assert first.status_code == 201
+    assert second.status_code == 429
+
+
+def test_schedule_updates_and_deletes_share_sensitive_rate_limit(monkeypatch):
+    monkeypatch.delenv("CLOUDSENTINEL_API_TOKEN", raising=False)
+    monkeypatch.setenv("CLOUDSENTINEL_SCHEDULE_RATE_LIMIT", "1")
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+    body = {"url": "https://example.com/health", "interval_seconds": 60}
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/schedules", json=body)
+        assert created.status_code == 201
+        # Creation consumed the one request allowed in the rolling minute.
+        updated = client.patch(f"/api/v1/schedules/{created.json()['id']}", json={"enabled": False})
+
+    assert updated.status_code == 429
+
+
+def test_reputation_lookups_are_rate_limited(monkeypatch):
+    monkeypatch.delenv("CLOUDSENTINEL_API_TOKEN", raising=False)
+    monkeypatch.setenv("CLOUDSENTINEL_REPUTATION_RATE_LIMIT", "1")
+    monkeypatch.setenv("VIRUSTOTAL_API_KEY", "test-key")
+    monkeypatch.setattr(main.VirusTotalProvider, "lookup", AsyncMock(return_value={"score": 0, "cached": False}))
+    app = main.create_app("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/reputation", json={"indicator_type": "ip", "indicator": "8.8.8.8"})
+        second = client.post("/api/v1/reputation", json={"indicator_type": "ip", "indicator": "1.1.1.1"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
 
 
 def test_check_history_survives_api_restart(monkeypatch, tmp_path):
@@ -241,6 +475,186 @@ def test_check_history_survives_api_restart(monkeypatch, tmp_path):
     assert history.status_code == 200
     assert history.json()["summary"]["total_checks"] == 1
     assert history.json()["checks"][0]["url"] == result["url"]
+
+
+@pytest.mark.skipif(
+    os.getenv("CLOUDSENTINEL_TEST_POSTGRES") != "1",
+    reason="Set CLOUDSENTINEL_TEST_POSTGRES=1 to write one check to the configured PostgreSQL database.",
+)
+def test_postgres_check_history_survives_api_restart(monkeypatch):
+    database_url = database_url_from_environment()
+    assert database_url.get_backend_name() == "postgresql"
+    result = make_result(url=f"https://postgres-integration.example/{uuid4()}")
+    monkeypatch.setattr(main, "check_endpoint", AsyncMock(return_value=result))
+
+    first_app = main.create_app(database_url)
+    with TestClient(first_app) as first_client:
+        response = first_client.post("/api/v1/check", json={"url": result["url"]})
+        assert response.status_code == 200
+        history = first_client.get("/api/v1/checks?limit=500").json()
+        assert any(row["url"] == result["url"] for row in history["checks"])
+
+    restarted_app = main.create_app(database_url)
+    with TestClient(restarted_app) as restarted_client:
+        history = restarted_client.get("/api/v1/checks?limit=500").json()
+
+    saved = [row for row in history["checks"] if row["url"] == result["url"]]
+    assert len(saved) == 1
+    assert saved[0]["status"] == "healthy"
+
+
+@pytest.mark.skipif(
+    os.getenv("CLOUDSENTINEL_TEST_POSTGRES") != "1",
+    reason="Set CLOUDSENTINEL_TEST_POSTGRES=1 to exercise PostgreSQL schedule locking.",
+)
+def test_postgres_concurrent_workers_claim_one_due_schedule():
+    from services.api.scheduler import LEASE_SECONDS, claim_next_schedule
+
+    database_url = database_url_from_environment()
+    app = main.create_app(database_url)
+    with TestClient(app) as client:
+        now = datetime.now(timezone.utc)
+        with app.state.session_factory.begin() as session:
+            prior_test_schedules = session.scalars(
+                select(MonitoringSchedule).where(
+                    MonitoringSchedule.target_url.like("https://postgres-lock.example/%"),
+                    MonitoringSchedule.deleted_at.is_(None),
+                )
+            ).all()
+            for prior in prior_test_schedules:
+                prior.enabled = False
+                prior.deleted_at = now
+                prior.updated_at = now
+        created = client.post(
+            "/api/v1/schedules",
+            json={
+                "url": f"https://postgres-lock.example/{uuid4()}",
+                "interval_seconds": 60,
+            },
+        )
+        assert created.status_code == 201
+        schedule_id = created.json()["id"]
+        # Keep the synthetic slot ahead of any real due schedules in this dev database.
+        due_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        with app.state.session_factory.begin() as session:
+            schedule = session.get(MonitoringSchedule, schedule_id)
+            schedule.next_run_at = due_at
+
+        barrier = threading.Barrier(2)
+
+        def claim(worker_id):
+            barrier.wait()
+            return claim_next_schedule(app.state.session_factory, worker_id)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(claim, ("postgres-worker-a", "postgres-worker-b")))
+        claimed_for_schedule = [
+            item for item in claims
+            if item is not None and item["schedule_id"] == schedule_id
+        ]
+        assert len(claimed_for_schedule) == 1
+
+        expired = claim_next_schedule(
+            app.state.session_factory,
+            "postgres-worker-recovery",
+            now=datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS + 1),
+        )
+        assert expired is not None
+        assert expired["schedule_id"] == schedule_id
+        assert client.delete(f"/api/v1/schedules/{schedule_id}").status_code == 204
+
+
+@pytest.mark.skipif(
+    os.getenv("CLOUDSENTINEL_TEST_POSTGRES") != "1",
+    reason="Set CLOUDSENTINEL_TEST_POSTGRES=1 to persist a synthetic notification in PostgreSQL.",
+)
+def test_postgres_incident_notification_survives_worker_restart():
+    from services.api.notifications import LEASE_SECONDS, _finish_attempt, claim_notification
+    from services.api.scheduler import run_one_due_check
+
+    database_url = database_url_from_environment()
+    target = f"https://postgres-notification.example/{uuid4()}"
+    app = main.create_app(database_url)
+    with TestClient(app) as client:
+        # Retire only this test's prior synthetic outbox rows so the two
+        # concurrent claims below contend for exactly the current test event.
+        with app.state.session_factory.begin() as session:
+            prior_events = session.scalars(
+                select(IncidentNotification)
+                .join(MonitoringIncident, MonitoringIncident.id == IncidentNotification.incident_id)
+                .join(MonitoringSchedule, MonitoringSchedule.id == MonitoringIncident.schedule_id)
+                .where(MonitoringSchedule.target_url.like("https://postgres-notification.example/%"))
+            ).all()
+            for prior in prior_events:
+                prior.status = "suppressed"
+                prior.lease_owner = None
+                prior.lease_expires_at = None
+        created = client.post("/api/v1/schedules", json={
+            "url": target, "interval_seconds": 60, "failure_threshold": 1,
+        })
+        assert created.status_code == 201
+        schedule_id = created.json()["id"]
+        with app.state.session_factory.begin() as session:
+            session.get(MonitoringSchedule, schedule_id).next_run_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        failure = make_result(url=target, status="down", status_code=None, latency_ms=None, error="Request timed out")
+        assert asyncio.run(run_one_due_check(
+            app.state.session_factory, "postgres-notification-test", AsyncMock(return_value=failure)
+        ))
+        assert client.delete(f"/api/v1/schedules/{schedule_id}").status_code == 204
+
+    restarted = main.create_app(database_url)
+    with TestClient(restarted):
+        with restarted.state.session_factory() as session:
+            event = session.scalar(
+                select(IncidentNotification)
+                .join(MonitoringIncident, MonitoringIncident.id == IncidentNotification.incident_id)
+                .join(MonitoringSchedule, MonitoringSchedule.id == MonitoringIncident.schedule_id)
+                .where(MonitoringSchedule.target_url == target)
+            )
+        assert event is not None
+        assert event.event_type == "opened"
+        assert event.status == "pending"
+
+        barrier = threading.Barrier(2)
+        def claim(worker_id):
+            barrier.wait()
+            return claim_notification(restarted.state.session_factory, worker_id, provider="resend_api")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(claim, ("mail-worker-a", "mail-worker-b")))
+        claimed = [item for item in claims if item is not None]
+        assert len(claimed) == 1
+        recovered = claim_notification(
+            restarted.state.session_factory,
+            "mail-worker-recovery",
+            provider="resend_api",
+            now=datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS + 1),
+        )
+        assert recovered is not None
+        assert recovered["id"] == event.id
+        _finish_attempt(
+            restarted.state.session_factory,
+            recovered,
+            None,
+            provider="resend_api",
+            now=recovered["claimed_at"] + timedelta(seconds=1),
+        )
+        # Once the lifecycle event is delivered, repeated workers cannot claim
+        # it again. PostgreSQL row locking above also proved only one of the
+        # concurrently-started workers claimed the initial delivery.
+        assert claim_notification(
+            restarted.state.session_factory,
+            "mail-worker-after-delivery",
+            provider="resend_api",
+        ) is None
+
+    after_attempt_restart = main.create_app(database_url)
+    with TestClient(after_attempt_restart) as client:
+        persisted = next(
+            item for item in client.get("/api/v1/notifications").json()["notifications"]
+            if item["id"] == event.id
+        )
+        assert persisted["status"] == "delivered"
+        assert persisted["attempts"][0]["status"] == "delivered"
 
 
 def test_prohibited_dns_resolution_is_persisted_without_connecting(monkeypatch):

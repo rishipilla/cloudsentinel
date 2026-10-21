@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 import ssl
@@ -13,6 +14,7 @@ import httpx
 
 MAX_TIMEOUT_SECONDS = 30.0
 MAX_DNS_ADDRESSES = 16
+MAX_RESPONSE_BYTES = 1024 * 1024
 LOCAL_HOST_SUFFIXES = (
     ".localhost",
     ".local",
@@ -58,6 +60,24 @@ def _normalize_hostname(hostname: str) -> str:
     return normalized
 
 
+def _validate_hostname_allowlist(hostname: str) -> None:
+    """Require explicit public target approval in production."""
+    if os.getenv("CLOUDSENTINEL_ENV", "development").lower() != "production":
+        return
+    approved = []
+    for item in os.getenv("CLOUDSENTINEL_TARGET_ALLOWLIST", "").split(","):
+        if not item.strip():
+            continue
+        try:
+            approved.append(_normalize_hostname(item.strip().rstrip(".")))
+        except (TargetRejectedError, ValueError) as exc:
+            raise TargetRejectedError("The configured target allowlist is invalid.") from exc
+    if not approved:
+        raise TargetRejectedError("No endpoint targets are approved for monitoring.")
+    if not any(hostname == domain or hostname.endswith("." + domain) for domain in approved):
+        raise TargetRejectedError("Target hostname is not on the approved allowlist.")
+
+
 def _validated_ip_address(address: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     try:
         parsed = ipaddress.ip_address(address)
@@ -98,9 +118,11 @@ def validate_target_url(url: str) -> None:
     except ValueError:
         if re.fullmatch(r"[0-9.]+", hostname):
             raise ValueError("The target hostname is invalid.")
-        _normalize_hostname(hostname)
+        normalized = _normalize_hostname(hostname)
+        _validate_hostname_allowlist(normalized)
     else:
-        _validated_ip_address(str(address))
+        address = _validated_ip_address(str(address))
+        _validate_hostname_allowlist(str(address))
 
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
@@ -212,13 +234,20 @@ async def check_endpoint(url: str, timeout_seconds: float = 5.0) -> dict:
             follow_redirects=False,
             transport=PinnedIPHTTPTransport(),
         ) as client:
-            response = await client.get(url)
+            async with client.stream("GET", url) as response:
+                # Probe availability without buffering an arbitrary response body.
+                consumed = 0
+                async for chunk in response.aiter_bytes():
+                    consumed += len(chunk)
+                    if consumed > MAX_RESPONSE_BYTES:
+                        break
+                status_code = response.status_code
 
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
 
-        if response.status_code >= 500:
+        if status_code >= 500:
             status = "down"
-        elif response.status_code >= 400 or latency_ms >= 1000:
+        elif status_code >= 400 or latency_ms >= 1000:
             status = "degraded"
         else:
             status = "healthy"
@@ -226,7 +255,7 @@ async def check_endpoint(url: str, timeout_seconds: float = 5.0) -> dict:
         return {
             "url": url,
             "status": status,
-            "status_code": response.status_code,
+            "status_code": status_code,
             "latency_ms": latency_ms,
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }

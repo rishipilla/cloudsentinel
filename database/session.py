@@ -9,7 +9,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import Base, MonitoringCheck
+from database.models import Base, MonitoringCheck, ThreatIntelRateLock
 
 MAX_ERROR_DETAIL_LENGTH = 500
 SENSITIVE_QUERY_PARTS = (
@@ -33,6 +33,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def database_url_from_environment() -> URL:
     load_dotenv(PROJECT_ROOT / ".env")
 
+    configured_url = os.environ.get("DATABASE_URL")
+    if configured_url:
+        url = make_url(configured_url)
+        if url.get_backend_name() == "postgresql" and url.drivername == "postgresql":
+            url = url.set(drivername="postgresql+psycopg")
+        if url.get_backend_name() not in {"postgresql", "sqlite"}:
+            raise RuntimeError("DATABASE_URL must use PostgreSQL or SQLite.")
+        return url
+
     password = os.environ.get("POSTGRES_PASSWORD")
     if not password:
         raise RuntimeError("POSTGRES_PASSWORD must be set to connect to PostgreSQL.")
@@ -53,6 +62,13 @@ def create_database_engine(database_url: str | URL | None = None) -> Engine:
         url = make_url(url)
 
     engine_options: dict[str, object] = {"pool_pre_ping": True}
+    if url.get_backend_name() == "postgresql":
+        # Bound connect hangs so API and worker can retry/report an outage.
+        engine_options["connect_args"] = {
+            "connect_timeout": 5,
+            "options": "-c statement_timeout=10000 -c lock_timeout=5000",
+        }
+        engine_options["pool_timeout"] = 10
     if url.get_backend_name() == "sqlite":
         engine_options["connect_args"] = {"check_same_thread": False}
         if url.database in (None, "", ":memory:"):
@@ -62,7 +78,44 @@ def create_database_engine(database_url: str | URL | None = None) -> Engine:
 
 
 def initialize_database(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        # Serialize additive table creation when API and both workers start together.
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(734829104)"))
+            Base.metadata.create_all(connection)
+            # Older development databases created this table with only its key.
+            # Extend it additively in place; retain every existing row and table.
+            connection.execute(text(
+                "ALTER TABLE threat_intel_rate_locks "
+                "ADD COLUMN IF NOT EXISTS recent_requests VARCHAR(1000) NOT NULL DEFAULT '[]'"
+            ))
+            connection.execute(text(
+                "ALTER TABLE threat_intel_rate_locks "
+                "ADD COLUMN IF NOT EXISTS daily_window VARCHAR(10)"
+            ))
+            connection.execute(text(
+                "ALTER TABLE threat_intel_rate_locks "
+                "ADD COLUMN IF NOT EXISTS daily_count INTEGER NOT NULL DEFAULT 0"
+            ))
+            connection.execute(text(
+                "ALTER TABLE incident_notifications "
+                "ADD COLUMN IF NOT EXISTS lease_provider VARCHAR(32)"
+            ))
+            connection.execute(text(
+                "ALTER TABLE notification_attempts "
+                "ALTER COLUMN completed_at DROP NOT NULL"
+            ))
+    else:
+        Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as dialect_insert
+        elif engine.dialect.name == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert as dialect_insert
+        else:
+            return
+        statement = dialect_insert(ThreatIntelRateLock).values(provider="virustotal")
+        connection.execute(statement.on_conflict_do_nothing(index_elements=["provider"]))
 
 
 def database_is_ready(engine: Engine) -> None:
@@ -92,6 +145,18 @@ def sanitize_checked_url(url: str) -> str:
 
 
 def persist_check(session_factory: sessionmaker[Session], result: dict) -> None:
+    session = session_factory()
+    try:
+        session.add(monitoring_check_from_result(result))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def monitoring_check_from_result(result: dict) -> MonitoringCheck:
     status_code = result.get("status_code")
     error_detail = result.get("error")
     if error_detail is not None and error_detail not in SAFE_ERROR_DETAILS:
@@ -99,33 +164,23 @@ def persist_check(session_factory: sessionmaker[Session], result: dict) -> None:
     if error_detail is None and status_code is not None and status_code >= 400:
         error_detail = f"HTTP response status {status_code}"
 
-    session = session_factory()
-    try:
-        checked_at = datetime.fromisoformat(result["checked_at"].replace("Z", "+00:00"))
-        if checked_at.tzinfo is None:
-            checked_at = checked_at.replace(tzinfo=timezone.utc)
-        else:
-            checked_at = checked_at.astimezone(timezone.utc)
+    checked_at = datetime.fromisoformat(result["checked_at"].replace("Z", "+00:00"))
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    else:
+        checked_at = checked_at.astimezone(timezone.utc)
 
-        session.add(
-            MonitoringCheck(
-                checked_url=sanitize_checked_url(result["url"]),
-                checked_at=checked_at,
-                is_success=status_code is not None
-                and status_code < 400
-                and error_detail is None,
-                status_code=status_code,
-                latency_ms=result.get("latency_ms"),
-                error_detail=(
-                    str(error_detail)[:MAX_ERROR_DETAIL_LENGTH]
-                    if error_detail is not None
-                    else None
-                ),
-            )
+    return MonitoringCheck(
+        checked_url=sanitize_checked_url(result["url"]),
+        checked_at=checked_at,
+        is_success=status_code is not None
+        and status_code < 400
+        and error_detail is None,
+        status_code=status_code,
+        latency_ms=result.get("latency_ms"),
+        error_detail=(
+            str(error_detail)[:MAX_ERROR_DETAIL_LENGTH]
+            if error_detail is not None
+            else None
         )
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    )
