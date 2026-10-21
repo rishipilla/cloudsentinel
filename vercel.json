@@ -1,17 +1,17 @@
+
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "cloudsentinel-web": {
       "root": ".",
-      "framework": "python",
-      "entrypoint": "services.api.main:app",
-      "buildCommand": "pip install -r requirements.txt"
+      "entrypoint": "services/api/main.py",
+      "framework": "fastapi"
     }
   },
   "rewrites": [
     {
       "source": "/(.*)",
       "destination": {
-        "type": "service",
         "service": "cloudsentinel-web"
       }
     }
